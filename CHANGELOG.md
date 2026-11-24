@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Upgraded rmcp to 3.11 for MCP discovery negotiation with OMP 19.1.1. Supports `server/discover` before `initialize`, modern per-request metadata, and legacy initialization. Added isolated note-read regression coverage for both lifecycles.
+
 ## v1.6.1 — Patch Release (2026-04-21)
 
 ### Fixed
