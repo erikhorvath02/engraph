@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
 static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
@@ -264,7 +264,7 @@ impl MockLlm {
                 raw.push(f);
             }
             // Next round: hash the previous hash digest (as hex) so values differ.
-            seed = format!("{:x}", {
+            seed = hex::encode({
                 let mut h2 = Sha256::new();
                 h2.update(hash);
                 h2.finalize()
@@ -381,12 +381,23 @@ pub fn download_model(url: &str, dest: &Path, expected_sha256: Option<&str>) -> 
     fn try_download(url: &str, dest: &Path, expected_sha256: Option<&str>) -> Result<()> {
         tracing::info!("downloading {} -> {}", url, dest.display());
 
-        let resp = ureq::get(url)
+        let agent = ureq::Agent::config_builder()
+            .tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                    .build(),
+            )
+            .build()
+            .new_agent();
+        let resp = agent
+            .get(url)
             .call()
             .map_err(|e| anyhow::anyhow!("HTTP GET {url}: {e}"))?;
 
         let total_size: u64 = resp
-            .header("Content-Length")
+            .headers()
+            .get("Content-Length")
+            .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
@@ -408,7 +419,7 @@ pub fn download_model(url: &str, dest: &Path, expected_sha256: Option<&str>) -> 
         {
             let mut file = std::fs::File::create(&tmp_path)
                 .map_err(|e| anyhow::anyhow!("creating {}: {e}", tmp_path.display()))?;
-            let mut reader = resp.into_reader();
+            let mut reader = resp.into_body().into_reader();
             let mut buffer = [0u8; 8192];
             loop {
                 let n = reader.read(&mut buffer)?;
@@ -461,7 +472,7 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Ensure a model is present locally, downloading if not cached.
@@ -702,12 +713,8 @@ impl LlamaEmbed {
 
     /// Run embedding inference and return the truncated, L2-normalized embedding.
     fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
-        // Tokenize using llama.cpp's built-in tokenizer.
-        // Use AddBos::Never because PromptFormat already adds <bos> for embeddinggemma.
-        let tokens = self
-            .model
-            .str_to_token(text, AddBos::Never)
-            .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?;
+        // PromptFormat already adds the embedding model's BOS token.
+        let tokens = self.model.vocab().tokenize(text.as_bytes(), false, true);
         if tokens.is_empty() {
             bail!("tokenizer returned empty token sequence");
         }
@@ -1004,11 +1011,8 @@ impl LlamaOrchestrator {
     /// Run autoregressive generation (greedy decode) up to `max_tokens`.
     /// Returns the generated text (excluding the prompt).
     fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String> {
-        // Tokenize using llama.cpp's built-in tokenizer.
-        let tokens = self
-            .model
-            .str_to_token(prompt, AddBos::Always)
-            .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?;
+        let vocab = self.model.vocab();
+        let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
         if tokens.is_empty() {
             bail!("tokenizer returned empty token sequence");
         }
@@ -1039,6 +1043,7 @@ impl LlamaOrchestrator {
         // Each token may produce multi-byte UTF-8 sequences; use an encoding_rs decoder
         // to correctly reassemble them across token boundaries.
         let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut token_bytes = Vec::with_capacity(8);
         let prompt_len = tokens.len();
 
         for step in 0..max_tokens {
@@ -1046,16 +1051,20 @@ impl LlamaOrchestrator {
             sampler.accept(new_token);
 
             // Check for end-of-generation.
-            if self.model.is_eog_token(new_token) {
+            if vocab.is_eog(new_token) {
                 break;
             }
 
             // Decode this token to text using llama.cpp's built-in tokenizer.
-            let piece = self
-                .model
-                .token_to_piece(new_token, &mut decoder, false, None)
-                .map_err(|e| anyhow::anyhow!("token_to_piece failed: {e}"))?;
-            output.push_str(&piece);
+            token_bytes.clear();
+            vocab.token_to_piece_into(new_token, &mut token_bytes, false, None);
+            output.reserve(
+                decoder
+                    .max_utf8_buffer_length(token_bytes.len())
+                    .ok_or_else(|| anyhow::anyhow!("decoded token exceeds string capacity"))?,
+            );
+            let (result, _, _) = decoder.decode_to_string(&token_bytes, &mut output, false);
+            debug_assert_eq!(result, encoding_rs::CoderResult::InputEmpty);
 
             // Add token to batch for next iteration.
             batch.clear();
@@ -1158,19 +1167,15 @@ impl LlamaRerank {
         let model = LlamaModel::load_from_file(backend, &model_path, &model_params)
             .map_err(|e| anyhow::anyhow!("loading reranker model {}: {e}", model_path.display()))?;
 
-        // Look up Yes/No token IDs via the model's built-in tokenizer.
-        // str_to_token returns Vec<LlamaToken>; we take the first token ID (skip BOS).
-        let yes_tokens = model
-            .str_to_token("Yes", AddBos::Never)
-            .map_err(|e| anyhow::anyhow!("tokenizing 'Yes': {e}"))?;
+        // Look up Yes/No token IDs without inserting special tokens.
+        let vocab = model.vocab();
+        let yes_tokens = vocab.tokenize(b"Yes", false, true);
         let yes_token_id = yes_tokens
             .first()
             .map(|t| t.0)
             .ok_or_else(|| anyhow::anyhow!("model tokenizer returned no tokens for 'Yes'"))?;
 
-        let no_tokens = model
-            .str_to_token("No", AddBos::Never)
-            .map_err(|e| anyhow::anyhow!("tokenizing 'No': {e}"))?;
+        let no_tokens = vocab.tokenize(b"No", false, true);
         let no_token_id = no_tokens
             .first()
             .map(|t| t.0)
@@ -1195,11 +1200,10 @@ impl RerankModel for LlamaRerank {
     fn rerank_score(&mut self, query: &str, document: &str) -> Result<f32> {
         let input_text = format_reranker_input(query, document);
 
-        // Tokenize using llama.cpp's built-in tokenizer.
         let tokens = self
             .model
-            .str_to_token(&input_text, AddBos::Always)
-            .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?;
+            .vocab()
+            .tokenize(input_text.as_bytes(), true, true);
         if tokens.is_empty() {
             bail!("tokenizer returned empty token sequence");
         }
@@ -1246,6 +1250,60 @@ impl RerankModel for LlamaRerank {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_download_streams_large_body_and_checks_sha256() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.gguf", listener.local_addr().unwrap());
+        let chunk = [0x5au8; 8192];
+        let chunks = 1408;
+        let mut hash = Sha256::new();
+        for _ in 0..chunks {
+            hash.update(chunk);
+        }
+        let expected = hex::encode(hash.finalize());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut header = String::new();
+            loop {
+                header.clear();
+                assert!(reader.read_line(&mut header).unwrap() > 0);
+                if header == "\r\n" {
+                    break;
+                }
+            }
+            drop(reader);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                chunk.len() * chunks
+            )
+            .unwrap();
+            for _ in 0..chunks {
+                stream.write_all(&chunk).unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.gguf");
+        download_model(&url, &dest, Some(&expected)).unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().len(),
+            (chunk.len() * chunks) as u64
+        );
+        assert_eq!(sha256_file(&dest).unwrap(), expected);
+        assert!(!dest.with_extension("tmp").exists());
+    }
 
     #[test]
     fn test_mock_embed_deterministic() {

@@ -107,7 +107,7 @@ pub fn compute_file_hash(path: &Path) -> Result<String> {
         .with_context(|| format!("reading file for hashing: {}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(&content);
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Compare vault files against the store to find new, changed, and deleted files.
