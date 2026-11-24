@@ -13,7 +13,7 @@ use crate::store::{Store, StoreStats};
 fn orchestration_cache_key(query: &str) -> String {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(query.as_bytes());
-    format!("{:x}", hash)
+    hex::encode(hash)
 }
 
 /// A single search result with metadata.

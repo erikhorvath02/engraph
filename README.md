@@ -136,6 +136,8 @@ Or configure MCP manually in `~/.claude/settings.json`:
 }
 ```
 
+The same `engraph serve` command works with OMP 19.1.1. The server supports MCP `2026-07-28` discovery and per-request metadata, plus legacy `initialize` clients. OMP can probe `server/discover` before initialization without terminating the server. Add `--read-only` to reject note mutations.
+
 Now Claude can search your vault, read notes, build context bundles, and create new notes — all through structured tool calls.
 
 **AI Agent Skills** — Install the Engraph skills using the skills CLI (recommended):

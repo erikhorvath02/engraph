@@ -219,7 +219,7 @@ pub fn authorize(
 
 /// Generate a new API key with `eg_` prefix + 32 hex chars.
 pub fn generate_api_key() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     let hex: String = (0..32)
         .map(|_| format!("{:x}", rng.random_range(0..16u8)))
@@ -1026,7 +1026,7 @@ async fn handle_reindex_file(
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     };
 
     let config = crate::config::Config::load().unwrap_or_default();

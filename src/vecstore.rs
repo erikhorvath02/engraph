@@ -32,7 +32,7 @@ pub fn init_vec_table(conn: &Connection, dim: usize) -> Result<()> {
 
 /// Insert a vector with the given ID.
 pub fn insert_vec(conn: &Connection, vector_id: u64, embedding: &[f32]) -> Result<()> {
-    use zerocopy::AsBytes;
+    use zerocopy::IntoBytes;
     conn.execute(
         "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
         rusqlite::params![vector_id as i64, embedding.as_bytes()],
@@ -59,7 +59,7 @@ pub fn search_vec(
     k: usize,
     tombstones: &HashSet<u64>,
 ) -> Result<Vec<(u64, f32)>> {
-    use zerocopy::AsBytes;
+    use zerocopy::IntoBytes;
 
     // Request extra results to compensate for tombstone filtering.
     let fetch_k = if tombstones.is_empty() { k } else { k * 2 };

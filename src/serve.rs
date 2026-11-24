@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use anyhow::Result;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use rmcp::{ErrorData as McpError, ServiceExt, tool, tool_handler, tool_router};
@@ -277,7 +277,7 @@ fn to_json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpE
             None::<serde_json::Value>,
         )
     })?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 }
 
 /// Record a recently-written file path + mtime so the watcher can skip re-indexing it.
@@ -864,7 +864,7 @@ impl EngraphServer {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(content.as_bytes());
-            format!("{:x}", hasher.finalize())
+            hex::encode(hasher.finalize())
         };
 
         let config = crate::config::Config::load().unwrap_or_default();
@@ -905,7 +905,7 @@ impl EngraphServer {
         let config = crate::config::Config::load().unwrap_or_default();
         let block =
             crate::identity::format_identity_block(&config, &store).map_err(|e| mcp_err(&e))?;
-        Ok(CallToolResult::success(vec![Content::text(block)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(block)]))
     }
 
     #[tool(
@@ -949,8 +949,8 @@ impl EngraphServer {
 
 #[tool_handler]
 impl rmcp::handler::server::ServerHandler for EngraphServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "engraph: vault intelligence for Obsidian. \
                  Read: vault_map to orient, search to find, read/read_section for content, who/project for context bundles, health for vault diagnostics. \
                  Write: create for new notes, append to add content, edit to modify a section, rewrite to replace body, \
@@ -1166,6 +1166,148 @@ pub async fn run_serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn exchange(
+        client: &mut tokio::io::BufReader<tokio::io::DuplexStream>,
+        request: serde_json::Value,
+    ) -> serde_json::Value {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        client.get_mut().write_all(&bytes).await.unwrap();
+        let mut response = String::new();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_line(&mut response),
+        )
+        .await
+        .expect("MCP response timed out")
+        .unwrap();
+        assert!(read > 0, "MCP server closed before responding");
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], request["id"]);
+        assert!(response.get("error").is_none(), "{response}");
+        response["result"].clone()
+    }
+
+    #[tokio::test]
+    async fn discovery_negotiates_modern_and_legacy_note_reads() {
+        use tokio::io::AsyncWriteExt;
+
+        for legacy in [false, true] {
+            let vault = tempfile::tempdir().unwrap();
+            let content = "# Handshake\n\nDiscovery keeps note reads available.\n";
+            std::fs::write(vault.path().join("Handshake.md"), content).unwrap();
+            let store = Store::open_memory().unwrap();
+            store
+                .insert_file("Handshake.md", "hash", 0, &[], "abcdef", None, None)
+                .unwrap();
+            let server = EngraphServer {
+                store: Arc::new(Mutex::new(store)),
+                embedder: Arc::new(Mutex::new(Box::new(crate::llm::MockLlm::new(384)))),
+                vault_path: Arc::new(vault.path().to_owned()),
+                profile: Arc::new(None),
+                tool_router: EngraphServer::tool_router(),
+                orchestrator: None,
+                reranker: None,
+                recent_writes: Arc::new(Mutex::new(HashMap::new())),
+                read_only: true,
+            };
+            let (transport, client) = tokio::io::duplex(65536);
+            let task = tokio::spawn(async move {
+                server
+                    .serve(transport)
+                    .await
+                    .unwrap()
+                    .waiting()
+                    .await
+                    .unwrap();
+            });
+            let mut client = tokio::io::BufReader::new(client);
+            let meta = serde_json::json!({
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "engraph-regression", "version": "1"
+                }
+            });
+            let discovered = exchange(
+                &mut client,
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "server/discover",
+                    "params": {"_meta": meta}
+                }),
+            )
+            .await;
+            assert!(
+                discovered["supportedVersions"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("2026-07-28"))
+            );
+            assert!(discovered["capabilities"]["tools"].is_object());
+
+            if legacy {
+                let initialized = exchange(
+                    &mut client,
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": 2, "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-11-25", "capabilities": {},
+                            "clientInfo": {"name": "engraph-regression", "version": "1"}
+                        }
+                    }),
+                )
+                .await;
+                assert_eq!(initialized["protocolVersion"], "2025-11-25");
+                client
+                    .get_mut()
+                    .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+                    .await
+                    .unwrap();
+            }
+
+            let params = if legacy {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({"_meta": meta})
+            };
+            let tools = exchange(
+                &mut client,
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": params
+                }),
+            )
+            .await;
+            assert!(
+                tools["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == "read")
+            );
+            let mut params = params;
+            params["name"] = serde_json::json!("read");
+            params["arguments"] = serde_json::json!({"file": "Handshake.md"});
+            let result = exchange(
+                &mut client,
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": params
+                }),
+            )
+            .await;
+            let note: serde_json::Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(note["path"], "Handshake.md");
+            assert_eq!(note["content"], content);
+            drop(client);
+            tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
 
     /// Regression test for <https://github.com/devwhodevs/engraph/issues/32>.
     #[test]

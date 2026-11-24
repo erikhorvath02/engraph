@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Upgraded rmcp to 3.11 for MCP discovery negotiation with OMP 19.1.1. Supports `server/discover` before `initialize`, modern per-request metadata, and legacy initialization. Added isolated note-read regression coverage for both lifecycles.
+
+### Changed
+- Refreshed all direct dependency requirements to current stable releases and updated the lockfile. Migrated HTTP downloads to ureq 3 with OS certificate verification, SHA-256 hex encoding, llama.cpp vocabulary APIs, vector serialization to zerocopy `IntoBytes`, and random generation to `RngExt`. Added a large model-download regression with SHA-256 verification.
+
 ## v1.6.1 — Patch Release (2026-04-21)
 
 ### Fixed

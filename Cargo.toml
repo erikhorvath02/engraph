@@ -15,37 +15,38 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-toml = "0.8"
-dirs = "5"
+toml = "1.2"
+dirs = "7"
 anyhow = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
-sha2 = "0.10"
-ureq = { version = "2.12", features = ["native-certs"] }
-indicatif = "0.17"
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+sha2 = "0.11"
+hex = "0.4"
+ureq = { version = "3.5", features = ["platform-verifier"] }
+indicatif = "0.18"
 dialoguer = "0.12"
 console = "0.16"
 regex = "1"
-sqlite-vec = "0.1.8-alpha.1"
-zerocopy = { version = "0.7", features = ["derive"] }
+sqlite-vec = "0.1.9"
+zerocopy = { version = "0.8", features = ["derive"] }
 rayon = "1"
 time = { version = "0.3", features = ["parsing", "formatting", "macros"] }
 strsim = "0.11"
 ignore = "0.4"
-rmcp = { version = "1.5", features = ["transport-io"] }
+rmcp = { version = "3.11", features = ["transport-io"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "net"] }
-notify = "7.0"
-notify-debouncer-full = "0.4"
+notify = "9"
+notify-debouncer-full = "0.8"
 llama-cpp-2 = "0.1"
 encoding_rs = "0.8"
-shimmytok = "0.7"
+shimmytok = "0.8"
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.7", features = ["cors"] }
 tower = "0.5"
 uuid = { version = "1", features = ["v4"] }
-rand = "0.9"
+rand = "0.10"
 tokio-util = "0.7"
 
 [features]

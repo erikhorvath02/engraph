@@ -415,7 +415,7 @@ pub fn today_date() -> String {
 fn compute_content_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Get file mtime as seconds since epoch.
